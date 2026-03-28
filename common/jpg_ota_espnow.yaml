@@ -1,0 +1,11 @@
+packages:
+  ota_wifi: !include jpg_ota.yaml
+button:
+  - platform: espnow_node
+    node_id: gateway
+    name: Update Firmware
+    id: update_firmware
+    on_press:
+      then:
+        - logger.log: "OTA Starting!"
+        - script.execute: wifi_ota

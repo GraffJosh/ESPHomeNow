@@ -1,0 +1,10 @@
+packages:
+  ota_wifi: !include jpg_ota.yaml
+button:
+  - platform: template
+    name: Update Firmware (remote)
+    id: update_firmware_remote
+    on_press:
+      then:
+        - logger.log: "OTA Starting!"
+        - script.execute: wifi_ota

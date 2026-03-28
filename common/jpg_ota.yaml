@@ -1,0 +1,36 @@
+
+globals:
+  - id: ota_in_progress
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
+http_request:
+
+ota:
+  - platform: http_request
+
+script:
+  - id: wifi_ota
+    then:
+      - logger.log: "Enabling wifi and triggering OTA"
+      - lambda: |-
+          id(ota_in_progress) = true;
+      - delay: 50ms
+      - wifi.enable:
+      - wait_until:
+          condition:
+            wifi.connected:
+          timeout: 60s
+      - logger.log: "Wi-Fi connected, triggering OTA"
+      - ota.http_request.flash:
+          md5_url: https://firmware.jpg.industries/firmware/${device_name}/md5
+          url: https://firmware.jpg.industries/firmware/${device_name}/latest
+          username: "${ota_password}_${device_name}"
+          password: "${ota_password}_${device_name}"
+      - logger.log: "OTA Connection failed, trying backup"
+      - ota.http_request.flash:
+          md5_url: https://panel.lan:5001/firmware/${device_name}/md5
+          url: https://panel.lan:5001/firmware/${device_name}/latest
+          username: "${ota_password}_${device_name}"
+          password: "${ota_password}_${device_name}"

@@ -1,0 +1,159 @@
+substitutions:
+  device_name: espnow-node
+  power_down_duration: 30
+esphome:
+  name: ${device_name}
+  friendly_name: ESPNow node
+  on_boot: 
+    then:
+      if:
+        condition:
+          lambda: "return id(sleep_enabled);"
+        then:
+          - deep_sleep.allow: sleep_system
+        else:
+          - deep_sleep.prevent: sleep_system
+  on_shutdown:
+    then:
+      - lambda: "id(gateway)->sleepNode(${power_down_duration});"
+      - lambda: "global_preferences->sync();"
+
+preferences:
+  flash_write_interval: 0s
+  
+
+esp32:
+  board: esp32-c6-devkitc-1
+  variant: esp32c6
+  flash_size: 4MB
+  framework:
+    # platform_version: 6.6.0
+    type: esp-idf
+    # version: 5.2.1
+    sdkconfig_options:
+      CONFIG_ESPTOOLPY_FLASHSIZE_4MB: y
+
+safe_mode:
+  id: safety
+  boot_is_good_after: 
+    seconds: 15
+
+external_components:
+  - source:
+      type: local
+      path: components
+packages:
+  ota_wifi: !include common/jpg_ota_espnow.yaml
+
+deep_sleep:
+  id: sleep_system
+  run_duration: 
+    30s
+  sleep_duration: 
+    ${power_down_duration}s
+
+
+espnow_node:
+  id: gateway
+  expiration: ${power_down_duration}s
+  on_gateway_connected:
+    then:
+      - safe_mode.mark_successful
+      - lambda: "ESP_LOGD(\"Test\",\"Gateway Connected\");"
+  on_transaction_complete:
+    then:
+    - lambda: |-
+        ESP_LOGD("Test", "Transaction complete");
+    - safe_mode.mark_successful
+    - if:
+        condition:
+          lambda: "return id(sleep_enabled) && !id(ota_in_progress);"
+        then:
+          deep_sleep.enter: sleep_system
+          
+logger:
+
+wifi:
+  id: the_wifi
+  ssid: !secret wifi_ssid_3
+  password: !secret wifi_password_3
+  enable_on_boot: False
+  reboot_timeout: 
+    0s
+  power_save_mode: NONE
+  output_power: 15dB
+  fast_connect: True
+  
+light:
+  - platform: esp32_rmt_led_strip
+    name: RGB LED
+    id: board_rgb_led
+    pin:
+      number: 8
+      ignore_strapping_warning: True
+    num_leds: 1
+    chipset: WS2812
+    rgb_order: GRB
+    effects: 
+      - pulse: 
+          max_brightness: 100%
+          min_brightness: 25%
+          name: identifyPulse
+text:
+  - platform: espnow_node
+    name: Build Version
+    node_id: gateway
+    id: build_version
+    lambda: |-
+      return std::string(__DATE__) + " " + std::string(__TIME__);
+switch:
+  - platform: espnow_node
+    node_id: gateway
+    name: Control light
+    id: control_light
+    restore_mode: RESTORE_DEFAULT_OFF
+    on_turn_on:
+      - light.turn_on: 
+          id: board_rgb_led
+          transition_length: 0s
+          brightness: 100%
+      - delay: 50ms
+    on_turn_off:
+      - light.turn_off: 
+          id: board_rgb_led
+          transition_length: 0s
+      - delay: 50ms
+  - platform: espnow_node
+    node_id: gateway
+    name: Sleep Enable
+    id: sleep_enable
+    restore_mode: RESTORE_DEFAULT_OFF 
+    on_turn_on:
+      - lambda: "id(sleep_enabled) = true;"
+      - delay: 50ms
+      - deep_sleep.allow: sleep_system
+    on_turn_off:
+      - lambda: "id(sleep_enabled) = false;"
+      - deep_sleep.prevent: sleep_system
+      - delay: 50ms
+
+globals:
+  - id: node_id
+    type: std::string
+    restore_value: false
+    initial_value: '"0000"'
+  - id: node_name
+    type: std::string
+    restore_value: true
+    initial_value: '"Node"'
+  - id: espnow_channel
+    type: uint8_t
+    initial_value: "1"
+  - id: espnow_channel_locked
+    type: bool
+    restore_value: false
+    initial_value: "false"
+  - id: sleep_enabled
+    type: bool
+    restore_value: yes
+    initial_value: 'true'
