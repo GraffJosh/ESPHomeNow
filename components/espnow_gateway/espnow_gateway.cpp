@@ -26,7 +26,7 @@ namespace espnow_gateway {
 static const char *TAG = "espnow_gateway";
 #define MAX_ISR_PACKETS 10
 static ESPNowPacket packet_pool[MAX_ISR_PACKETS];
-static bool packet_used[MAX_ISR_PACKETS] = {0};
+volatile static bool packet_used[MAX_ISR_PACKETS] = {0};
 static const uint8_t broadcast_bytes[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
 static MacAddr broadcast_mac(broadcast_bytes);
 
@@ -103,24 +103,34 @@ void ESPNowMQTTGateway::loop() {
             // release packet back to pool
             for(int i=0;i<MAX_ISR_PACKETS;i++){
                 if(&packet_pool[i]==p){
-                    packet_used[i]=false;
+                    packet_used[i] = false;
                     break;
                 }
             }
         }
         for (auto& [mac, packetQueue] : espNowCommandsQueue) {
             auto it = node_names_.find(mac);
-            if (it != node_names_.end() && it->second.state == nodeState::ONLINE) {
-                if (packetQueue.size() > 0)
-                {
-                    for (SensorPacket& cmd : packetQueue) {
-                        auto packet = cmd.getPayload();
-                        esp_now_send(mac.data(), packet.data(),  packet.size());
-                        delay(100);
-                    }
-                    packetQueue.clear();
-                    send_ping_reply(mac);
-                }
+            if (it == node_names_.end())
+                continue;
+        
+            if (it->second.state != nodeState::ONLINE)
+                continue;
+        
+            if (!packetQueue.empty()) {
+                // Take the first command
+                SensorPacket &cmd = packetQueue.front();
+                auto packet = cmd.getPayload();
+        
+                esp_now_send(mac.data(), packet.data(), packet.size());
+        
+                // Remove it after sending
+                packetQueue.erase(packetQueue.begin());
+        
+                // Send ping reply reflecting remaining commands
+                send_ping_reply(mac);
+        
+                // Only send ONE packet per loop iteration total
+                break;
             }
         }
     }
@@ -309,17 +319,13 @@ bool ESPNowMQTTGateway::add_peer(MacAddr &mac) {
     if (esp_now_is_peer_exist(mac.data())) {
         return true;
     }
-    esp_now_peer_info_t *peer = (esp_now_peer_info_t*) malloc(sizeof(esp_now_peer_info_t));
-    if (peer == NULL) {
-        ESP_LOGE(TAG, "Malloc peer information fail");
-        return false;
-    }
-    memset(peer, 0, sizeof(esp_now_peer_info_t));
-    peer->channel = 0;
-    peer->encrypt = false;
-    memcpy(peer->peer_addr, mac.data(), ESP_NOW_ETH_ALEN);
-    esp_err_t ret = esp_now_add_peer(peer) ;
-    free(peer);
+    // esp_now_peer_info_t *peer = (esp_now_peer_info_t*) malloc(sizeof(esp_now_peer_info_t));
+    esp_now_peer_info_t peer{};
+    memset(&peer, 0, sizeof(esp_now_peer_info_t));
+    peer.channel = 0;
+    peer.encrypt = false;
+    memcpy(&peer.peer_addr, mac.data(), ESP_NOW_ETH_ALEN);
+    esp_err_t ret = esp_now_add_peer(&peer) ;
     if (ret != ESP_OK) { // 12395 = peer already exists
         ESP_LOGW(TAG,"esp_now_add_peer %s failed: %d, %s", mac.to_string().c_str(), ret, espnow_get_error_string(ret).c_str());
         return false;
@@ -451,11 +457,11 @@ void ESPNowMQTTGateway::handle_entity_discovery(const EntityDiscoveryPacket *pkt
     ESP_LOGI(TAG,"Entity discovery published: %s",topic.c_str());
 }
 
-void ESPNowMQTTGateway::send_availability_message(std::string id)
+void ESPNowMQTTGateway::send_availability_message(std::string id, bool available)
 {
     if(mqtt_)
     {
-        mqtt_->publish(std::string("homeassistant/devices/espnow_")+id+std::string("/availability"),"online");
+        mqtt_->publish("homeassistant/devices/espnow_" + id + "/availability",available ? "online" : "offline");
     }
 }
 
@@ -559,7 +565,7 @@ bool ESPNowMQTTGateway::node_joined(MacAddr &mac) {
             t->trigger(mac.to_string());
         }
     }
-    update_sensors();
+    // update_sensors();
     return newNode;
 }
 
@@ -572,7 +578,7 @@ bool ESPNowMQTTGateway::node_sleep(MacAddr &mac, uint16_t sleep_duration) {
         it->second.sleep_duration = sleep_duration;
         ESP_LOGI(TAG,"Node: %s went to sleep for %d seconds",it->second.name.c_str(),it->second.sleep_duration);
     }
-    update_sensors();
+    // update_sensors();
     return true;
 }
 bool ESPNowMQTTGateway::node_wake(MacAddr &mac, uint16_t sleep_duration) {
@@ -585,7 +591,7 @@ bool ESPNowMQTTGateway::node_wake(MacAddr &mac, uint16_t sleep_duration) {
     }else{
         newNode = true;
     }
-    update_sensors();
+    // update_sensors();
     return newNode;
 }
 

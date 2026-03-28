@@ -1,4 +1,5 @@
-
+substitutions:
+  ota_key: !secret ota_password
 globals:
   - id: ota_in_progress
     type: bool
@@ -26,11 +27,11 @@ script:
       - ota.http_request.flash:
           md5_url: https://firmware.jpg.industries/firmware/${device_name}/md5
           url: https://firmware.jpg.industries/firmware/${device_name}/latest
-          username: "${ota_password}_${device_name}"
-          password: "${ota_password}_${device_name}"
+          username: "${ota_key}_${device_name}"
+          password: "${ota_key}_${device_name}"
       - logger.log: "OTA Connection failed, trying backup"
       - ota.http_request.flash:
           md5_url: https://panel.lan:5001/firmware/${device_name}/md5
           url: https://panel.lan:5001/firmware/${device_name}/latest
-          username: "${ota_password}_${device_name}"
-          password: "${ota_password}_${device_name}"
+          username: "${ota_key}_${device_name}"
+          password: "${ota_key}_${device_name}"

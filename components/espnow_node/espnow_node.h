@@ -61,7 +61,7 @@ class ESPNowNode : public Component {
         static ESPNowNode *instance;
         std::unordered_map<std::string, ESPNowEntityInterface*> entities_;
         QueueHandle_t packet_queue;
-        bool channel_locked_ = false;
+        volatile bool channel_locked_ = false;
         bool espnow_initialized = false;
         bool watchdog_pet = false;
         bool scanning_ = false;

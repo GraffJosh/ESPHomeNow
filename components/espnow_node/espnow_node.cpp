@@ -52,27 +52,11 @@ namespace espnow_node {
   static const char *TAG = "espnow_node";
   #define MAX_ISR_PACKETS 10
   static ESPNowPacket packet_pool[MAX_ISR_PACKETS];
-  static bool packet_used[MAX_ISR_PACKETS] = {0};
+  volatile static bool packet_used[MAX_ISR_PACKETS] = {0};
   static uint8_t broadcast_mac[6] = {0xFF,0xFF,0xFF,0xFF,0xFF,0xFF};
   ESPNowNode* ESPNowNode::instance = nullptr;
 
-void ESPNowNode::register_entity(ESPNowEntityInterface *entity) {
-  std::string id(entity->discoveryPacket->entity.id,strnlen(entity->discoveryPacket->entity.id,sizeof(entity->discoveryPacket->entity.id)));
-  entities_[id] = entity;
-  ESP_LOGD(TAG,"Registering Entity: %s",id.c_str());
-}
-void ESPNowNode::publish_all_entities()
-{
-  if (node_id_ == "0000") {
-    ESP_LOGW(TAG,"Request to publish entities before init, rejecting");
-    return;
-  }
-  for (const auto& [key, entity] : entities_) {
-    ESP_LOGD(TAG,"Publishing discovery for: %s",key.c_str());
-    publish_entity_discovery(entity->discoveryPacket);
-    delay(50);
-  }
-}
+
 void ESPNowNode::connect(int channel, bool wifiConfiguredExternally) {
   esp_err_t ret;
   // Init the wifi interface for espnow communications
@@ -92,7 +76,7 @@ void ESPNowNode::connect(int channel, bool wifiConfiguredExternally) {
   add_peer(broadcast_mac); 
   uint8_t mac[6];
   esp_wifi_get_mac(WIFI_IF_STA, mac);
-  char buf[5] = {0};
+  char buf[8] = {0};
   snprintf(buf, sizeof(buf), "%02x%02x", mac[4], mac[5]);
   node_id_ = std::string(buf);
   
@@ -108,6 +92,78 @@ void ESPNowNode::connect(int channel, bool wifiConfiguredExternally) {
 
   scan_channels(channel_, 1000);
 }
+void ESPNowNode::disconnect(){
+  sleepNode();
+  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+  // 1️⃣ Stop ESP-NOW if running
+  esp_now_deinit();
+  channel_locked_ = false;
+  espnow_initialized = false;
+}
+
+bool ESPNowNode::add_peer(uint8_t *newMac) {
+  MacAddr mac(newMac);
+  if (esp_now_is_peer_exist(mac.data())) {
+      return true;
+  }
+  // esp_now_peer_info_t *peer = (esp_now_peer_info_t*) malloc(sizeof(esp_now_peer_info_t));
+  esp_now_peer_info_t peer{};
+  memset(&peer, 0, sizeof(esp_now_peer_info_t));
+  peer.channel = 0;
+  peer.encrypt = false;
+  memcpy(&peer.peer_addr, mac.data(), ESP_NOW_ETH_ALEN);
+  esp_err_t ret = esp_now_add_peer(&peer) ;
+  if (ret != ESP_OK) { // 12395 = peer already exists
+      ESP_LOGW(TAG,"esp_now_add_peer %s failed: %d, %s", mac.to_string().c_str(), ret, espnow_get_error_string(ret).c_str());
+      return false;
+  } else {
+      ESP_LOGI(TAG,"Peer%s added", mac.to_string().c_str());
+      return true;
+  }
+}
+
+void ESPNowNode::scan_channels(uint8_t hintChannel, uint16_t timeout_ms) {
+  channel_ = hintChannel;
+  if(!scanning_)
+  {
+    scanning_ = true;
+    scan_step(0,timeout_ms);
+    if(channel_locked_){
+      for (auto *t : gateway_connected_triggers_) {
+        MacAddr gateway(gatewayMac);
+        t->trigger(gateway.to_string());
+      }
+    }
+    scanning_ = false;
+  }else{
+    ESP_LOGD(TAG,"Already scanning, preventing duplication");
+  }
+}
+
+void ESPNowNode::scan_step(uint8_t iteration,uint16_t timeout_ms) {
+  static uint8_t start_channel_;
+  if (channel_locked_) {
+    ESP_LOGI(TAG, "Channel locked! %d", channel_);
+    return;
+  }
+  if (iteration >= 16) {
+    ESP_LOGW(TAG, "No gateway found, using channel: %d", channel_);
+    return;
+  }
+  if (iteration == 0) {
+    start_channel_ = channel_;
+  }
+  channel_ = ((start_channel_ - 1 + iteration) % 16) + 1;
+
+  ESP_LOGD(TAG, "Trying channel %d...", channel_);
+  esp_err_t ret = espnow_set_channel(channel_);
+  if (ret == ESP_OK) send_ping();
+  
+  iteration++;
+  set_timeout(timeout_ms, [this, iteration, timeout_ms]() { scan_step(iteration, timeout_ms); });
+}
+
+
 void ESPNowNode::sleepNode(uint16_t seconds){
   PingPacket pkt;
   pkt.header.type = PacketType::NODE_SLEEP;
@@ -117,14 +173,6 @@ void ESPNowNode::sleepNode(uint16_t seconds){
   send_packet(gatewayMac,pkt.getPayload().data(),pkt.getPayload().size());
   ESP_LOGD(TAG,"Going to sleep for %d seconds!", seconds);
   delay(50);
-}
-void ESPNowNode::disconnect(){
-  sleepNode();
-  esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-  // 1️⃣ Stop ESP-NOW if running
-  esp_now_deinit();
-  channel_locked_ = false;
-  espnow_initialized = false;
 }
 esp_err_t ESPNowNode::send_packet(uint8_t* mac, uint8_t* data, size_t size)
 {
@@ -166,10 +214,6 @@ void ESPNowNode::recv_cb(const esp_now_recv_info_t *info, const uint8_t *data, i
   xQueueSendFromISR(instance->packet_queue, &p, &xHigherPriorityTaskWoken);
   portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
 }
-
-
-
-
 
 void ESPNowNode::setup() {
   esp_err_t ret;
@@ -253,71 +297,6 @@ void ESPNowNode::handle_packet(const ESPNowPacket *pkt)
   }
 }
 
-bool ESPNowNode::add_peer(uint8_t *mac) {
-    if (esp_now_is_peer_exist(mac)) {
-        return true;
-    }
-    esp_now_peer_info_t *peer = (esp_now_peer_info_t*) malloc(sizeof(esp_now_peer_info_t));
-    if (peer == NULL) {
-        ESP_LOGE(TAG, "Malloc peer information fail");
-        return false;
-    }
-    memset(peer, 0, sizeof(esp_now_peer_info_t));
-    peer->channel = 0;
-    peer->encrypt = false;
-    memcpy(peer->peer_addr, mac, ESP_NOW_ETH_ALEN);
-    esp_err_t ret = esp_now_add_peer(peer) ;
-    free(peer);
-    if (ret != ESP_OK) { // 12395 = peer already exists
-        ESP_LOGW(TAG,"esp_now_add_peer %02x:%02x:%02x:%02x:%02x:%02x failed: %d, %s", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], ret, espnow_get_error_string(ret).c_str());
-        return false;
-    } else {
-        ESP_LOGI(TAG,"Peer %02x:%02x:%02x:%02x:%02x:%02x added", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-        return true;
-    }
-}
-
-void ESPNowNode::scan_channels(uint8_t hintChannel, uint16_t timeout_ms) {
-  channel_ = hintChannel;
-  if(!scanning_)
-  {
-    scanning_ = true;
-    scan_step(0,timeout_ms);
-    if(channel_locked_){
-      for (auto *t : gateway_connected_triggers_) {
-        MacAddr gateway(gatewayMac);
-        t->trigger(gateway.to_string());
-      }
-    }
-    scanning_ = false;
-  }else{
-    ESP_LOGD(TAG,"Already scanning, preventing duplication");
-  }
-}
-
-void ESPNowNode::scan_step(uint8_t iteration,uint16_t timeout_ms) {
-  static uint8_t start_channel_;
-  if (channel_locked_) {
-    ESP_LOGI(TAG, "Channel locked! %d", channel_);
-    return;
-  }
-  if (iteration >= 16) {
-    ESP_LOGW(TAG, "No gateway found, using channel: %d", channel_);
-    return;
-  }
-  if (iteration == 0) {
-    start_channel_ = channel_;
-  }
-  channel_ = ((start_channel_ - 1 + iteration) % 16) + 1;
-
-  ESP_LOGD(TAG, "Trying channel %d...", channel_);
-  esp_err_t ret = espnow_set_channel(channel_);
-  if (ret == ESP_OK) send_ping();
-  
-  iteration++;
-  set_timeout(timeout_ms, [this, iteration, timeout_ms]() { scan_step(iteration, timeout_ms); });
-}
-
 
 void ESPNowNode::send_ping(){
   esp_err_t ret;
@@ -348,8 +327,8 @@ void ESPNowNode::publish_entity_discovery(EntityDiscoveryPacket *pkt)
 {
   ESP_LOGD(TAG,"Publishing discovery for: %s",pkt->entity.id);
   pkt->expiration_seconds = expiration_seconds_;
-  strcpy(pkt->header.id, node_id_.c_str());
-  strcpy(pkt->node_name,node_name_.c_str());
+  safe_copy(pkt->header.id, node_id_, sizeof(pkt->header.id));
+  safe_copy(pkt->node_name, node_name_, sizeof(pkt->node_name));
   // std::vector<uint8_t> payload = pkt->getPayload();
   // send_packet(broadcast_mac, payload.data(),payload.size());
   send_packet(broadcast_mac, reinterpret_cast<uint8_t*>(pkt),sizeof(*pkt));
@@ -375,6 +354,41 @@ void ESPNowNode::send_sensor_state(const char *entity_id, std::string value){
   pkt.sensor.entity.type = EntityType::TEXT;
   safe_copy(pkt.sensor.data.textValue, value,sizeof(pkt.sensor.data.textValue));
   send_packet(gatewayMac, reinterpret_cast<uint8_t*>(&pkt),sizeof(pkt));
+}
+
+void ESPNowNode::register_entity(ESPNowEntityInterface *entity) {
+  std::string id(entity->discoveryPacket->entity.id,strnlen(entity->discoveryPacket->entity.id,sizeof(entity->discoveryPacket->entity.id)));
+  entities_[id] = entity;
+  ESP_LOGD(TAG,"Registering Entity: %s",id.c_str());
+}
+void ESPNowNode::publish_all_entities()
+{
+  if (node_id_ == "0000") {
+    ESP_LOGW(TAG, "Request to publish entities before init, rejecting");
+    return;
+  }
+  std::vector<ESPNowEntityInterface*> list;
+  for (auto& [_, entity] : entities_) {
+    list.push_back(entity);
+  }
+  
+  size_t index = 0;
+  
+  auto send_next = std::make_shared<std::function<void()>>();
+  
+  *send_next = [this, list, index, send_next]() mutable {
+    if (index >= list.size())
+      return;
+  
+    ESP_LOGD(TAG, "Publishing discovery");
+    publish_entity_discovery(list[index]->discoveryPacket);
+  
+    index++;
+  
+    set_timeout(50, [send_next]() { (*send_next)(); });
+  };
+  
+  (*send_next)();
 }
 
 }  // namespace espnow_node
