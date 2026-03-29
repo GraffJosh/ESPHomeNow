@@ -170,3 +170,5 @@ Packet fields reference:
 Advanced integration tips:
 - If you want stronger delivery guarantees, add application-level acks in your node handlers or increase heartbeat/ping frequency for time-critical devices.
 - Keep the node `id` stable (node id is derived from MAC bytes by default) so Home Assistant topics remain consistent.
+
+Note, this readme was made by genAI (under human guidance). Take it with a grain of salt or two.
