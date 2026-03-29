@@ -170,7 +170,3 @@ Packet fields reference:
 Advanced integration tips:
 - If you want stronger delivery guarantees, add application-level acks in your node handlers or increase heartbeat/ping frequency for time-critical devices.
 - Keep the node `id` stable (node id is derived from MAC bytes by default) so Home Assistant topics remain consistent.
-
-If you'd like, I can also:
-- Add an illustrated sequence diagram of the packet exchange.
-- Produce a small example YAML and C++ snippet showing how to send a command from Home Assistant through the gateway to a node.
